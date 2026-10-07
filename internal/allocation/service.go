@@ -40,18 +40,16 @@ func (s *Service) Allocate(
 		if !ok {
 			return domain.NotFound("plan", planID)
 		}
-		if plan.State != domain.PlanActive {
-			return domain.InvalidState("plan must be active for node leasing", map[string]any{
-				"plan_id": planID,
-				"state":   plan.State,
-			})
-		}
+		presented := domain.CredentialFrom(ctx)
 		if existingID, exists := state.LeaseRequestKeys[requestIndex]; exists {
 			existing, found := state.LeaseGroups[existingID]
 			if !found {
 				return domain.NewError(domain.CodeStorageFailure, "lease request index is inconsistent", map[string]any{
 					"lease_group_id": existingID,
 				})
+			}
+			if _, authorized := domain.ReplayPlanCredential(presented, plan, existing.CredentialID, state.PlanCredentials); !authorized {
+				return domain.UnauthorizedPlanWrite(planID)
 			}
 			if existing.RequestFingerprint != fingerprint {
 				return domain.NewError(domain.CodeIdempotencyConflict, "request key was reused with different lease parameters", map[string]any{
@@ -62,14 +60,18 @@ func (s *Service) Allocate(
 			return nil
 		}
 
-		presented := domain.CredentialFrom(ctx)
-		if _, ok := domain.KnownPlanCredential(presented, plan, state.PlanCredentials); !ok {
-			return domain.NewError(domain.CodeUnauthorized, "plan credential is not authorized for this write", map[string]any{
+		credential, authorized := domain.ActivePlanCredential(presented, plan, state.PlanCredentials)
+		if !authorized {
+			return domain.UnauthorizedPlanWrite(planID)
+		}
+		if plan.State != domain.PlanActive {
+			return domain.InvalidState("plan must be active for node leasing", map[string]any{
 				"plan_id": planID,
+				"state":   plan.State,
 			})
 		}
 
-		expireLeases(state, now)
+		domain.ExpireLeases(state, now)
 		candidates := make([]domain.ResolverNode, 0)
 		for _, node := range state.Nodes {
 			if node.State != domain.NodeReady {
@@ -119,6 +121,7 @@ func (s *Service) Allocate(
 		group = domain.LeaseGroup{
 			ID:                 groupID,
 			PlanID:             planID,
+			CredentialID:       credential.ID,
 			RequestKey:         input.RequestKey,
 			RequestFingerprint: fingerprint,
 			Region:             input.Region,
@@ -143,6 +146,16 @@ func (s *Service) Release(ctx context.Context, leaseID string) (domain.NodeLease
 		lease, ok := state.Leases[leaseID]
 		if !ok {
 			return domain.NotFound("lease", leaseID)
+		}
+		plan, ok := state.Plans[lease.PlanID]
+		if !ok {
+			return domain.NewError(domain.CodeStorageFailure, "lease references a missing plan", map[string]any{
+				"plan_id": lease.PlanID,
+			})
+		}
+		presented := domain.CredentialFrom(ctx)
+		if _, authorized := domain.ActivePlanCredential(presented, plan, state.PlanCredentials); !authorized {
+			return domain.UnauthorizedPlanWrite(plan.ID)
 		}
 		if lease.State == domain.LeaseReleased || lease.State == domain.LeaseExpired {
 			result = lease
@@ -181,29 +194,8 @@ func (s *Service) ExpireDue(ctx context.Context) (int, error) {
 	now := s.clock.Now().UTC()
 	expired := 0
 	err := s.store.Write(ctx, func(state *domain.State) error {
-		expired = expireLeases(state, now)
+		expired = domain.ExpireLeases(state, now)
 		return nil
 	})
 	return expired, err
-}
-
-func expireLeases(state *domain.State, now time.Time) int {
-	count := 0
-	for leaseID, lease := range state.Leases {
-		if lease.State != domain.LeaseClaimed || lease.ExpiresAt.After(now) {
-			continue
-		}
-		finishedAt := now
-		lease.State = domain.LeaseExpired
-		lease.FinishedAt = &finishedAt
-		state.Leases[leaseID] = lease
-		if node, ok := state.Nodes[lease.NodeID]; ok && node.State == domain.NodeLeased {
-			node.State = domain.NodeReady
-			node.Version++
-			node.UpdatedAt = now
-			state.Nodes[node.ID] = node
-		}
-		count++
-	}
-	return count
 }

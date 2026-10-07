@@ -68,11 +68,14 @@ func (s *Service) RotateCredential(ctx context.Context, planID string) (domain.P
 		if !ok {
 			return domain.NotFound("plan", planID)
 		}
-		if current, ok := state.PlanCredentials[plan.ActiveCredentialID]; ok && !current.Retired() {
-			retiredAt := now
-			current.RetiredAt = &retiredAt
-			state.PlanCredentials[current.ID] = current
+		presented := domain.CredentialFrom(ctx)
+		current, authorized := domain.ActivePlanCredential(presented, plan, state.PlanCredentials)
+		if !authorized {
+			return domain.UnauthorizedPlanWrite(planID)
 		}
+		retiredAt := now
+		current.RetiredAt = &retiredAt
+		state.PlanCredentials[current.ID] = current
 		issued = domain.PlanCredential{
 			ID:        s.ids.New("crd"),
 			PlanID:    planID,
@@ -84,8 +87,9 @@ func (s *Service) RotateCredential(ctx context.Context, planID string) (domain.P
 		plan.Version++
 		state.Plans[planID] = plan
 		store.AddAudit(state, s.ids, "plan", planID, "credential_rotated", now, map[string]any{
-			"credential_id": issued.ID,
-			"version":       plan.Version,
+			"retired_credential_id": current.ID,
+			"credential_id":         issued.ID,
+			"version":               plan.Version,
 		})
 		return nil
 	})
@@ -98,10 +102,8 @@ func authorizePlanWrite(
 	credentials map[string]domain.PlanCredential,
 ) error {
 	presented := domain.CredentialFrom(ctx)
-	if _, ok := domain.KnownPlanCredential(presented, plan, credentials); !ok {
-		return domain.NewError(domain.CodeUnauthorized, "plan credential is not authorized for this write", map[string]any{
-			"plan_id": plan.ID,
-		})
+	if _, ok := domain.ActivePlanCredential(presented, plan, credentials); !ok {
+		return domain.UnauthorizedPlanWrite(plan.ID)
 	}
 	return nil
 }

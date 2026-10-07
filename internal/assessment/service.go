@@ -34,12 +34,7 @@ func (s *Service) Evaluate(
 		if !ok {
 			return domain.NotFound("plan", planID)
 		}
-		if plan.State == domain.PlanDraft {
-			return domain.InvalidState("plan must be active or completed for assessment", map[string]any{
-				"plan_id": planID,
-				"state":   plan.State,
-			})
-		}
+		presented := domain.CredentialFrom(ctx)
 		if existingID, exists := state.AssessmentRequestKeys[requestIndex]; exists {
 			existing, found := state.Assessments[existingID]
 			if !found {
@@ -47,13 +42,20 @@ func (s *Service) Evaluate(
 					"assessment_id": existingID,
 				})
 			}
+			if _, authorized := domain.ReplayPlanCredential(presented, plan, existing.CredentialID, state.PlanCredentials); !authorized {
+				return domain.UnauthorizedPlanWrite(planID)
+			}
 			result = existing
 			return nil
 		}
-		presented := domain.CredentialFrom(ctx)
-		if _, ok := domain.KnownPlanCredential(presented, plan, state.PlanCredentials); !ok {
-			return domain.NewError(domain.CodeUnauthorized, "plan credential is not authorized for this write", map[string]any{
+		credential, authorized := domain.ActivePlanCredential(presented, plan, state.PlanCredentials)
+		if !authorized {
+			return domain.UnauthorizedPlanWrite(planID)
+		}
+		if plan.State == domain.PlanDraft {
+			return domain.InvalidState("plan must be active or completed for assessment", map[string]any{
 				"plan_id": planID,
+				"state":   plan.State,
 			})
 		}
 		if plan.LatestRevisionID == "" {
@@ -80,6 +82,7 @@ func (s *Service) Evaluate(
 		}
 		result = domain.BuildAssessment(s.ids.New("asm"), plan, revision, probes, now)
 		result.RequestKey = input.RequestKey
+		result.CredentialID = credential.ID
 		state.Assessments[result.ID] = result
 		state.AssessmentRequestKeys[requestIndex] = result.ID
 		plan.LatestAssessmentID = result.ID
@@ -100,6 +103,10 @@ func (s *Service) Latest(ctx context.Context, planID string) (domain.RolloutAsse
 		plan, ok := state.Plans[planID]
 		if !ok {
 			return domain.NotFound("plan", planID)
+		}
+		presented := domain.CredentialFrom(ctx)
+		if _, authorized := domain.ActivePlanCredential(presented, plan, state.PlanCredentials); !authorized {
+			return domain.UnauthorizedPlanWrite(planID)
 		}
 		if plan.LatestAssessmentID == "" {
 			return domain.NotFound("assessment", planID)

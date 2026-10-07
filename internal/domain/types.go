@@ -111,6 +111,7 @@ type NodeLease struct {
 type LeaseGroup struct {
 	ID                 string    `json:"id"`
 	PlanID             string    `json:"plan_id"`
+	CredentialID       string    `json:"credential_id"`
 	RequestKey         string    `json:"request_key"`
 	RequestFingerprint string    `json:"request_fingerprint"`
 	Region             string    `json:"region,omitempty"`
@@ -123,6 +124,7 @@ type Probe struct {
 	LeaseID            string    `json:"lease_id"`
 	PlanID             string    `json:"plan_id"`
 	NodeID             string    `json:"node_id"`
+	CredentialID       string    `json:"credential_id"`
 	RequestKey         string    `json:"request_key"`
 	Success            bool      `json:"success"`
 	ObservedSerial     uint32    `json:"observed_serial"`
@@ -136,6 +138,7 @@ type RolloutAssessment struct {
 	ID               string    `json:"id"`
 	PlanID           string    `json:"plan_id"`
 	RevisionID       string    `json:"revision_id"`
+	CredentialID     string    `json:"credential_id"`
 	RequestKey       string    `json:"request_key"`
 	Verdict          Verdict   `json:"verdict"`
 	Reasons          []string  `json:"reasons"`

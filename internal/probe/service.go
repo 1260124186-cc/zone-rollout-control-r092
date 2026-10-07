@@ -2,31 +2,24 @@ package probe
 
 import (
 	"context"
-	"time"
 
 	"solo-0014-zone-rollout-control/internal/domain"
 	"solo-0014-zone-rollout-control/internal/platform"
 	"solo-0014-zone-rollout-control/internal/store"
 )
 
-type LeaseExpirer interface {
-	ExpireDue(context.Context) (int, error)
-}
-
 type Service struct {
-	store   *store.Store
-	clock   platform.Clock
-	ids     platform.IDGenerator
-	expirer LeaseExpirer
+	store *store.Store
+	clock platform.Clock
+	ids   platform.IDGenerator
 }
 
 func New(
 	stateStore *store.Store,
 	clock platform.Clock,
 	ids platform.IDGenerator,
-	expirer LeaseExpirer,
 ) *Service {
-	return &Service{store: stateStore, clock: clock, ids: ids, expirer: expirer}
+	return &Service{store: stateStore, clock: clock, ids: ids}
 }
 
 func (s *Service) Submit(
@@ -38,9 +31,6 @@ func (s *Service) Submit(
 	if err := domain.ValidateProbeInput(input, now); err != nil {
 		return domain.Probe{}, err
 	}
-	if _, err := s.expirer.ExpireDue(ctx); err != nil {
-		return domain.Probe{}, err
-	}
 	fingerprint := domain.ProbeFingerprint(leaseID, input)
 	var result domain.Probe
 	err := s.store.Write(ctx, func(state *domain.State) error {
@@ -48,12 +38,22 @@ func (s *Service) Submit(
 		if !ok {
 			return domain.NotFound("lease", leaseID)
 		}
+		plan, ok := state.Plans[lease.PlanID]
+		if !ok {
+			return domain.NewError(domain.CodeStorageFailure, "lease references a missing plan", map[string]any{
+				"plan_id": lease.PlanID,
+			})
+		}
+		presented := domain.CredentialFrom(ctx)
 		if lease.State == domain.LeaseReported && lease.ProbeID != "" {
 			existing, found := state.Probes[lease.ProbeID]
 			if !found {
 				return domain.NewError(domain.CodeStorageFailure, "lease references a missing probe", map[string]any{
 					"probe_id": lease.ProbeID,
 				})
+			}
+			if _, authorized := domain.ReplayPlanCredential(presented, plan, existing.CredentialID, state.PlanCredentials); !authorized {
+				return domain.UnauthorizedPlanWrite(plan.ID)
 			}
 			if existing.PayloadFingerprint != fingerprint {
 				return domain.NewError(domain.CodeIdempotencyConflict, "request key was reused with different probe content", map[string]any{
@@ -64,6 +64,14 @@ func (s *Service) Submit(
 			result = existing
 			return nil
 		}
+		credential, authorized := domain.ActivePlanCredential(presented, plan, state.PlanCredentials)
+		if !authorized {
+			return domain.UnauthorizedPlanWrite(plan.ID)
+		}
+		// An unauthenticated request must never change state, so the time-driven
+		// lease sweep runs only after the write has been authorized.
+		domain.ExpireLeases(state, now)
+		lease = state.Leases[leaseID]
 		if lease.State != domain.LeaseClaimed {
 			return domain.NewError(domain.CodeLeaseNotClaimed, "lease is not claimed", map[string]any{
 				"lease_id": leaseID,
@@ -74,18 +82,6 @@ func (s *Service) Submit(
 			return domain.NewError(domain.CodeLeaseExpired, "lease has expired", map[string]any{
 				"lease_id":   leaseID,
 				"expires_at": lease.ExpiresAt,
-			})
-		}
-		plan, ok := state.Plans[lease.PlanID]
-		if !ok {
-			return domain.NewError(domain.CodeStorageFailure, "lease references a missing plan", map[string]any{
-				"plan_id": lease.PlanID,
-			})
-		}
-		presented := domain.CredentialFrom(ctx)
-		if _, ok := domain.KnownPlanCredential(presented, plan, state.PlanCredentials); !ok {
-			return domain.NewError(domain.CodeUnauthorized, "plan credential is not authorized for this write", map[string]any{
-				"plan_id": plan.ID,
 			})
 		}
 		if plan.State != domain.PlanActive {
@@ -105,6 +101,7 @@ func (s *Service) Submit(
 			LeaseID:            leaseID,
 			PlanID:             lease.PlanID,
 			NodeID:             lease.NodeID,
+			CredentialID:       credential.ID,
 			RequestKey:         input.RequestKey,
 			Success:            input.Success,
 			ObservedSerial:     input.ObservedSerial,
@@ -132,8 +129,4 @@ func (s *Service) Submit(
 		return nil
 	})
 	return result, err
-}
-
-func pointer(value time.Time) *time.Time {
-	return &value
 }

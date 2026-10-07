@@ -136,6 +136,30 @@ func round(value float64, places int) float64 {
 	return math.Round(value*scale) / scale
 }
 
+// ExpireLeases transitions claimed leases whose deadline has passed to
+// expired and returns their nodes to ready. It is a pure time-driven
+// maintenance step that records no caller-initiated operation.
+func ExpireLeases(state *State, now time.Time) int {
+	count := 0
+	for leaseID, lease := range state.Leases {
+		if lease.State != LeaseClaimed || lease.ExpiresAt.After(now) {
+			continue
+		}
+		finishedAt := now.UTC()
+		lease.State = LeaseExpired
+		lease.FinishedAt = &finishedAt
+		state.Leases[leaseID] = lease
+		if node, ok := state.Nodes[lease.NodeID]; ok && node.State == NodeLeased {
+			node.State = NodeReady
+			node.Version++
+			node.UpdatedAt = now.UTC()
+			state.Nodes[node.ID] = node
+		}
+		count++
+	}
+	return count
+}
+
 func timePointer(value time.Time) *time.Time {
 	return &value
 }
@@ -158,6 +182,7 @@ func CredentialFrom(ctx context.Context) string {
 	return value
 }
 
+// ValidateCredentialSecret checks the shape of a caller-provided credential.
 func ValidateCredentialSecret(secret string) error {
 	if err := validateRequestKey(secret); err != nil {
 		return Validation("plan credential is invalid", map[string]any{
@@ -167,20 +192,51 @@ func ValidateCredentialSecret(secret string) error {
 	return nil
 }
 
-// KnownPlanCredential reports whether the presented secret was ever issued for
-// the plan, returning the matching credential record.
-func KnownPlanCredential(
+// ActivePlanCredential verifies that the presented secret is the plan's
+// currently active credential. Retired credentials never match, so they can
+// neither authorize new writes nor read plan data after rotation.
+func ActivePlanCredential(
 	secret string,
 	plan RolloutPlan,
 	credentials map[string]PlanCredential,
 ) (PlanCredential, bool) {
-	if secret == "" {
+	if secret == "" || plan.ActiveCredentialID == "" {
 		return PlanCredential{}, false
 	}
-	for _, credential := range credentials {
-		if credential.PlanID == plan.ID && credential.Secret == secret {
-			return credential, true
-		}
+	credential, ok := credentials[plan.ActiveCredentialID]
+	if !ok || credential.PlanID != plan.ID || credential.Retired() || credential.Secret != secret {
+		return PlanCredential{}, false
 	}
-	return PlanCredential{}, false
+	return credential, true
+}
+
+// ReplayPlanCredential authorizes retrieving a previously stored idempotent
+// result. The presented secret must be either the plan's currently active
+// credential or the exact credential that authorized the original request
+// (which may have been retired by a later rotation).
+func ReplayPlanCredential(
+	secret string,
+	plan RolloutPlan,
+	recordCredentialID string,
+	credentials map[string]PlanCredential,
+) (PlanCredential, bool) {
+	if credential, ok := ActivePlanCredential(secret, plan, credentials); ok {
+		return credential, true
+	}
+	if secret == "" || recordCredentialID == "" {
+		return PlanCredential{}, false
+	}
+	credential, ok := credentials[recordCredentialID]
+	if !ok || credential.PlanID != plan.ID || credential.Secret != secret {
+		return PlanCredential{}, false
+	}
+	return credential, true
+}
+
+// UnauthorizedPlanWrite builds the stable error returned when a request
+// cannot be authorized for the target plan.
+func UnauthorizedPlanWrite(planID string) *DomainError {
+	return NewError(CodeUnauthorized, "plan credential is not authorized for this write", map[string]any{
+		"plan_id": planID,
+	})
 }

@@ -59,7 +59,7 @@ func run() error {
 	plans := plan.New(stateStore, clock, ids)
 	nodes := fleet.New(stateStore, clock, ids)
 	allocations := allocation.New(stateStore, clock, ids)
-	probes := probe.New(stateStore, clock, ids, allocations)
+	probes := probe.New(stateStore, clock, ids)
 	assessments := assessment.New(stateStore, clock, ids)
 	api := httpapi.New(plans, nodes, allocations, probes, assessments, ids, logger)
 
