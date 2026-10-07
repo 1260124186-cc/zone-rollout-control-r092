@@ -48,6 +48,16 @@ func (s *Service) Submit(
 		if !ok {
 			return domain.NotFound("lease", leaseID)
 		}
+		plan, ok := state.Plans[lease.PlanID]
+		if !ok {
+			return domain.NewError(domain.CodeStorageFailure, "lease references a missing plan", map[string]any{
+				"plan_id": lease.PlanID,
+			})
+		}
+		presented := domain.CredentialFrom(ctx)
+		if _, ok := domain.KnownPlanCredential(presented, plan, state.PlanCredentials); !ok {
+			return domain.UnauthorizedPlanWrite(plan.ID)
+		}
 		if lease.State == domain.LeaseReported && lease.ProbeID != "" {
 			existing, found := state.Probes[lease.ProbeID]
 			if !found {
@@ -76,17 +86,8 @@ func (s *Service) Submit(
 				"expires_at": lease.ExpiresAt,
 			})
 		}
-		plan, ok := state.Plans[lease.PlanID]
-		if !ok {
-			return domain.NewError(domain.CodeStorageFailure, "lease references a missing plan", map[string]any{
-				"plan_id": lease.PlanID,
-			})
-		}
-		presented := domain.CredentialFrom(ctx)
-		if _, ok := domain.KnownPlanCredential(presented, plan, state.PlanCredentials); !ok {
-			return domain.NewError(domain.CodeUnauthorized, "plan credential is not authorized for this write", map[string]any{
-				"plan_id": plan.ID,
-			})
+		if _, ok := domain.ActivePlanCredential(presented, plan, state.PlanCredentials); !ok {
+			return domain.UnauthorizedPlanWrite(plan.ID)
 		}
 		if plan.State != domain.PlanActive {
 			return domain.InvalidState("plan must be active to store probes", map[string]any{

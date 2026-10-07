@@ -46,6 +46,11 @@ func (s *Service) Allocate(
 				"state":   plan.State,
 			})
 		}
+
+		presented := domain.CredentialFrom(ctx)
+		if _, ok := domain.KnownPlanCredential(presented, plan, state.PlanCredentials); !ok {
+			return domain.UnauthorizedPlanWrite(planID)
+		}
 		if existingID, exists := state.LeaseRequestKeys[requestIndex]; exists {
 			existing, found := state.LeaseGroups[existingID]
 			if !found {
@@ -62,11 +67,8 @@ func (s *Service) Allocate(
 			return nil
 		}
 
-		presented := domain.CredentialFrom(ctx)
-		if _, ok := domain.KnownPlanCredential(presented, plan, state.PlanCredentials); !ok {
-			return domain.NewError(domain.CodeUnauthorized, "plan credential is not authorized for this write", map[string]any{
-				"plan_id": planID,
-			})
+		if _, ok := domain.ActivePlanCredential(presented, plan, state.PlanCredentials); !ok {
+			return domain.UnauthorizedPlanWrite(planID)
 		}
 
 		expireLeases(state, now)
@@ -143,6 +145,16 @@ func (s *Service) Release(ctx context.Context, leaseID string) (domain.NodeLease
 		lease, ok := state.Leases[leaseID]
 		if !ok {
 			return domain.NotFound("lease", leaseID)
+		}
+		plan, ok := state.Plans[lease.PlanID]
+		if !ok {
+			return domain.NewError(domain.CodeStorageFailure, "lease references a missing plan", map[string]any{
+				"plan_id": lease.PlanID,
+			})
+		}
+		presented := domain.CredentialFrom(ctx)
+		if _, ok := domain.ActivePlanCredential(presented, plan, state.PlanCredentials); !ok {
+			return domain.UnauthorizedPlanWrite(plan.ID)
 		}
 		if lease.State == domain.LeaseReleased || lease.State == domain.LeaseExpired {
 			result = lease

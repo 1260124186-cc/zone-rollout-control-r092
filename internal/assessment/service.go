@@ -40,6 +40,10 @@ func (s *Service) Evaluate(
 				"state":   plan.State,
 			})
 		}
+		presented := domain.CredentialFrom(ctx)
+		if _, ok := domain.KnownPlanCredential(presented, plan, state.PlanCredentials); !ok {
+			return domain.UnauthorizedPlanWrite(planID)
+		}
 		if existingID, exists := state.AssessmentRequestKeys[requestIndex]; exists {
 			existing, found := state.Assessments[existingID]
 			if !found {
@@ -50,11 +54,8 @@ func (s *Service) Evaluate(
 			result = existing
 			return nil
 		}
-		presented := domain.CredentialFrom(ctx)
-		if _, ok := domain.KnownPlanCredential(presented, plan, state.PlanCredentials); !ok {
-			return domain.NewError(domain.CodeUnauthorized, "plan credential is not authorized for this write", map[string]any{
-				"plan_id": planID,
-			})
+		if _, ok := domain.ActivePlanCredential(presented, plan, state.PlanCredentials); !ok {
+			return domain.UnauthorizedPlanWrite(planID)
 		}
 		if plan.LatestRevisionID == "" {
 			return domain.InvalidState("plan has no zone revision", map[string]any{

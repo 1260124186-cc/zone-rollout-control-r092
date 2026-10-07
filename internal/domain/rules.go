@@ -168,7 +168,9 @@ func ValidateCredentialSecret(secret string) error {
 }
 
 // KnownPlanCredential reports whether the presented secret was ever issued for
-// the plan, returning the matching credential record.
+// the plan, returning the matching credential record. A retired credential
+// stays known so that requests it authorized before rotation can still be
+// replayed, but it must not authorize any new write.
 func KnownPlanCredential(
 	secret string,
 	plan RolloutPlan,
@@ -183,4 +185,33 @@ func KnownPlanCredential(
 		}
 	}
 	return PlanCredential{}, false
+}
+
+// ActivePlanCredential reports whether the presented secret matches the plan's
+// currently active credential, returning that credential record. Only the
+// active credential authorizes a new plan write.
+func ActivePlanCredential(
+	secret string,
+	plan RolloutPlan,
+	credentials map[string]PlanCredential,
+) (PlanCredential, bool) {
+	if secret == "" || plan.ActiveCredentialID == "" {
+		return PlanCredential{}, false
+	}
+	credential, ok := credentials[plan.ActiveCredentialID]
+	if !ok || credential.PlanID != plan.ID || credential.Retired() {
+		return PlanCredential{}, false
+	}
+	if credential.Secret != secret {
+		return PlanCredential{}, false
+	}
+	return credential, true
+}
+
+// UnauthorizedPlanWrite reports that the presented credential may not
+// authorize the requested plan write.
+func UnauthorizedPlanWrite(planID string) *DomainError {
+	return NewError(CodeUnauthorized, "plan credential is not authorized for this write", map[string]any{
+		"plan_id": planID,
+	})
 }

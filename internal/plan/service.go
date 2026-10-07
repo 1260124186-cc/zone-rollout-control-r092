@@ -68,6 +68,9 @@ func (s *Service) RotateCredential(ctx context.Context, planID string) (domain.P
 		if !ok {
 			return domain.NotFound("plan", planID)
 		}
+		if err := authorizePlanWrite(ctx, plan, state.PlanCredentials); err != nil {
+			return err
+		}
 		if current, ok := state.PlanCredentials[plan.ActiveCredentialID]; ok && !current.Retired() {
 			retiredAt := now
 			current.RetiredAt = &retiredAt
@@ -98,10 +101,8 @@ func authorizePlanWrite(
 	credentials map[string]domain.PlanCredential,
 ) error {
 	presented := domain.CredentialFrom(ctx)
-	if _, ok := domain.KnownPlanCredential(presented, plan, credentials); !ok {
-		return domain.NewError(domain.CodeUnauthorized, "plan credential is not authorized for this write", map[string]any{
-			"plan_id": plan.ID,
-		})
+	if _, ok := domain.ActivePlanCredential(presented, plan, credentials); !ok {
+		return domain.UnauthorizedPlanWrite(plan.ID)
 	}
 	return nil
 }
